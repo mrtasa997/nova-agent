@@ -8,7 +8,6 @@ from pydantic import BaseModel
 from openai import OpenAI
 from dotenv import load_dotenv
 import zipfile
-import io
 
 load_dotenv()
 
@@ -42,7 +41,7 @@ def read_file(filename, **kwargs):
     if not os.path.exists(path):
         return f"الملف {filename} غير موجود"
     with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+        return f.read()[:3000]
 
 def run_python(filename, **kwargs):
     path = os.path.join("projects", filename)
@@ -56,7 +55,7 @@ def run_python(filename, **kwargs):
             return "فشل التشغيل. الخطأ:\n" + result.stderr[:800]
         return "نجح التشغيل. الناتج:\n" + (result.stdout[:500] if result.stdout else "(بلا ناتج)")
     except subprocess.TimeoutExpired:
-        return "البرنامج ينتظر إدخال - هذا طبيعي للألعاب التفاعلية"
+        return "البرنامج ينتظر إدخال - طبيعي للألعاب التفاعلية"
     except Exception as e:
         return "خطأ: " + str(e)
 
@@ -67,26 +66,26 @@ def install_package(package_name, **kwargs):
             capture_output=True, text=True, timeout=120
         )
         if result.returncode == 0:
-            return f"تم تثبيت {package_name} بنجاح"
+            return f"تم تثبيت {package_name}"
         return f"فشل التثبيت: {result.stderr[:300]}"
     except Exception as e:
         return "خطأ: " + str(e)
 
 def list_files(**kwargs):
     if not os.path.exists("projects"):
-        return "فاضي"
+        return "المجلد فاضي - لا يوجد ملفات"
     result = []
     for root, dirs, files in os.walk("projects"):
         for f in files:
             result.append(os.path.relpath(os.path.join(root, f), "projects"))
-    return "\n".join(result) if result else "فاضي"
+    return "\n".join(result) if result else "المجلد فاضي - لا يوجد ملفات"
 
 def delete_file(filename, **kwargs):
     path = os.path.join("projects", filename)
     if os.path.exists(path):
         os.remove(path)
         return f"تم حذف {filename}"
-    return f"الملف {filename} غير موجود"
+    return f"الملف غير موجود"
 
 def create_zip(zip_name="project.zip", **kwargs):
     if not os.path.exists("projects"):
@@ -113,13 +112,13 @@ TOOL_FUNCTIONS = {
 }
 
 tools = [
-    {"type": "function", "function": {"name": "write_file", "description": "اكتب ملف كود جديد بأي لغة", "parameters": {"type": "object", "properties": {"filename": {"type": "string", "description": "اسم الملف مع المسار مثل app.py أو web/index.html"}, "content": {"type": "string", "description": "محتوى الملف"}}, "required": ["filename", "content"]}}},
+    {"type": "function", "function": {"name": "write_file", "description": "اكتب ملف كود جديد بأي لغة", "parameters": {"type": "object", "properties": {"filename": {"type": "string", "description": "اسم الملف مع المسار"}, "content": {"type": "string", "description": "محتوى الملف"}}, "required": ["filename", "content"]}}},
     {"type": "function", "function": {"name": "read_file", "description": "اقرأ ملف موجود", "parameters": {"type": "object", "properties": {"filename": {"type": "string"}}, "required": ["filename"]}}},
-    {"type": "function", "function": {"name": "run_python", "description": "شغّل ملف بايثون وشوف الناتج", "parameters": {"type": "object", "properties": {"filename": {"type": "string"}}, "required": ["filename"]}}},
-    {"type": "function", "function": {"name": "install_package", "description": "ثبّت مكتبة بايثون مثل flask أو requests", "parameters": {"type": "object", "properties": {"package_name": {"type": "string"}}, "required": ["package_name"]}}},
-    {"type": "function", "function": {"name": "list_files", "description": "اعرض كل الملفات", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "run_python", "description": "شغّل ملف بايثون", "parameters": {"type": "object", "properties": {"filename": {"type": "string"}}, "required": ["filename"]}}},
+    {"type": "function", "function": {"name": "install_package", "description": "ثبّت مكتبة بايثون", "parameters": {"type": "object", "properties": {"package_name": {"type": "string"}}, "required": ["package_name"]}}},
+    {"type": "function", "function": {"name": "list_files", "description": "اعرض كل الملفات الموجودة في المشروع", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "delete_file", "description": "احذف ملف", "parameters": {"type": "object", "properties": {"filename": {"type": "string"}}, "required": ["filename"]}}},
-    {"type": "function", "function": {"name": "create_zip", "description": "اجمع كل الملفات في ملف ZIP للتحميل", "parameters": {"type": "object", "properties": {"zip_name": {"type": "string", "description": "اسم ملف ZIP"}}}}},
+    {"type": "function", "function": {"name": "create_zip", "description": "اجمع كل الملفات في ZIP للتحميل", "parameters": {"type": "object", "properties": {"zip_name": {"type": "string"}}}}},
 ]
 
 class ChatRequest(BaseModel):
@@ -127,30 +126,39 @@ class ChatRequest(BaseModel):
 
 SYSTEM_PROMPT = """أنت NOVA، مساعد ذكي شامل وقوي جداً.
 
-أنت قادر على:
-1. **المحادثة العامة**: تجيب على أي سؤال (تاريخ، جغرافيا، رياضيات، علوم، دين، نصائح، إلخ) بلغة عربية واضحة ومفيدة.
-2. **البرمجة بكل اللغات**: Python, JavaScript, HTML, CSS, Java, C++, C#, PHP, Go, Ruby, SQL, Bash.
-3. **كتابة التطبيقات الكاملة**: مواقع ويب، APIs، ألعاب، أدوات، تطبيقات سطح مكتب.
-4. **الكتابة الإبداعية**: مقالات، قصص، قصائد، رسائل، سيناريوهات.
-5. **الترجمة والتلخيص والتحليل**.
+قدراتك:
+1. المحادثة العامة: تجيب على أي سؤال بالعربي.
+2. البرمجة بكل اللغات: Python, JavaScript, HTML, CSS, Java, C++, PHP, Go, Ruby, SQL.
+3. بناء التطبيقات الكاملة: مواقع، APIs، ألعاب، أدوات.
+4. الكتابة الإبداعية: مقالات، قصص، قصائد.
+5. الترجمة والتلخيص والتحليل.
 
-قواعد ذكية مهمة:
-1. **حدد نوع الطلب أولاً**:
-   - إذا كان سؤال محادثة عادي (مثل "ما عاصمة اليابان؟") → جاوب مباشرة بدون استخدام أي أداة.
-   - إذا كان طلب برمجة (مثل "اكتب لي كود") → استخدم الأدوات.
-2. **للبرمجة**:
-   - اكتب كود كامل وجاهز للتشغيل.
-   - استخدم write_file للكتابة.
-   - استخدم run_python لتشغيل كود بايثون.
-   - إذا فشل التشغيل، صلّح الخطأ وأعد التشغيل حتى ينجح.
+قواعد مهمة جداً:
+1. حدد نوع الطلب أولاً:
+   - سؤال محادثة عادي (مثل: ما عاصمة اليابان؟) → جاوب مباشرة بدون استخدام أدوات.
+   - طلب برمجة أو ملفات → استخدم الأدوات.
+
+2. للبرمجة:
+   - اكتب كود كامل وجاهز.
+   - استخدم write_file للكتابة ثم run_python للتشغيل.
+   - إذا فشل، صلّح الخطأ وأعد التشغيل حتى ينجح.
    - إذا احتجت مكتبة، استخدم install_package أولاً.
-3. **للمشاريع الكاملة**:
-   - نظّم الملفات بمجلدات (مثل web/index.html, web/style.css).
-   - اكتب كل ملف لوحده.
-   - اجمعهم بـ create_zip في النهاية.
-4. **لأي لغة برمجة** غير بايثون: اكتب الملف فقط، واشرح كيف يشغله المستخدم.
 
-ردك النهائي يكون بالعربي، واضح، ومنظم."""
+3. لتحليل الملفات (مهم جداً):
+   - إذا طلب المستخدم تحليل ملف أو تعديله، استخدم list_files أولاً لتعرف الملفات الموجودة.
+   - بعدها استخدم read_file لقراءة الملف المطلوب.
+   - حلل المحتوى واشرحه بالتفصيل.
+   - لا تقل "لا أرى الملف" قبل ما تجرب list_files.
+
+4. للمشاريع الكاملة:
+   - نظّم الملفات بمجلدات (مثل web/index.html).
+   - اجمعها بـ create_zip في النهاية.
+
+5. لأي لغة غير بايثون:
+   - اكتب الملف فقط.
+   - اشرح كيف يشغله المستخدم.
+
+ردك النهائي بالعربي، واضح ومنظم."""
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
@@ -189,7 +197,6 @@ async def chat(req: ChatRequest):
     
     return {"reply": "وصلت للحد الأقصى من الدورات", "logs": logs}
 
-# ========== رفع الملفات ==========
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
     os.makedirs("projects", exist_ok=True)
@@ -197,7 +204,7 @@ async def upload_file(file: UploadFile = File(...)):
     content = await file.read()
     with open(path, "wb") as f:
         f.write(content)
-    return {"message": f"تم رفع {file.filename}"}
+    return {"message": f"تم رفع {file.filename} إلى مجلد projects"}
 
 @app.get("/download/{filename}")
 async def download_file(filename: str):
