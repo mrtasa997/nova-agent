@@ -1,12 +1,14 @@
 import os
 import json
 import subprocess
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI
 from dotenv import load_dotenv
+import zipfile
+import io
 
 load_dotenv()
 
@@ -28,7 +30,9 @@ MODEL = os.getenv("LLM_MODEL")
 def write_file(filename, content, **kwargs):
     os.makedirs("projects", exist_ok=True)
     path = os.path.join("projects", filename)
-    os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(path) else None
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     return f"OK كتبت {filename}"
@@ -77,42 +81,76 @@ def list_files(**kwargs):
             result.append(os.path.relpath(os.path.join(root, f), "projects"))
     return "\n".join(result) if result else "فاضي"
 
+def delete_file(filename, **kwargs):
+    path = os.path.join("projects", filename)
+    if os.path.exists(path):
+        os.remove(path)
+        return f"تم حذف {filename}"
+    return f"الملف {filename} غير موجود"
+
+def create_zip(zip_name="project.zip", **kwargs):
+    if not os.path.exists("projects"):
+        return "لا يوجد ملفات"
+    zip_path = os.path.join("projects", zip_name)
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for root, dirs, files in os.walk("projects"):
+            for f in files:
+                if f == zip_name:
+                    continue
+                fp = os.path.join(root, f)
+                arc = os.path.relpath(fp, "projects")
+                zf.write(fp, arc)
+    return f"OK تم إنشاء {zip_name}"
+
 TOOL_FUNCTIONS = {
     "write_file": write_file,
     "read_file": read_file,
     "run_python": run_python,
     "install_package": install_package,
     "list_files": list_files,
+    "delete_file": delete_file,
+    "create_zip": create_zip,
 }
 
 tools = [
-    {"type": "function", "function": {"name": "write_file", "description": "اكتب ملف كود جديد", "parameters": {"type": "object", "properties": {"filename": {"type": "string", "description": "اسم الملف مع المسار"}, "content": {"type": "string", "description": "محتوى الملف"}}, "required": ["filename", "content"]}}},
+    {"type": "function", "function": {"name": "write_file", "description": "اكتب ملف كود جديد بأي لغة", "parameters": {"type": "object", "properties": {"filename": {"type": "string", "description": "اسم الملف مع المسار مثل app.py أو web/index.html"}, "content": {"type": "string", "description": "محتوى الملف"}}, "required": ["filename", "content"]}}},
     {"type": "function", "function": {"name": "read_file", "description": "اقرأ ملف موجود", "parameters": {"type": "object", "properties": {"filename": {"type": "string"}}, "required": ["filename"]}}},
-    {"type": "function", "function": {"name": "run_python", "description": "شغّل ملف بايثون", "parameters": {"type": "object", "properties": {"filename": {"type": "string"}}, "required": ["filename"]}}},
-    {"type": "function", "function": {"name": "install_package", "description": "ثبّت مكتبة بايثون مثل pygame أو flask", "parameters": {"type": "object", "properties": {"package_name": {"type": "string"}}, "required": ["package_name"]}}},
-    {"type": "function", "function": {"name": "list_files", "description": "اعرض كل الملفات في مجلد projects", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "run_python", "description": "شغّل ملف بايثون وشوف الناتج", "parameters": {"type": "object", "properties": {"filename": {"type": "string"}}, "required": ["filename"]}}},
+    {"type": "function", "function": {"name": "install_package", "description": "ثبّت مكتبة بايثون مثل flask أو requests", "parameters": {"type": "object", "properties": {"package_name": {"type": "string"}}, "required": ["package_name"]}}},
+    {"type": "function", "function": {"name": "list_files", "description": "اعرض كل الملفات", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "delete_file", "description": "احذف ملف", "parameters": {"type": "object", "properties": {"filename": {"type": "string"}}, "required": ["filename"]}}},
+    {"type": "function", "function": {"name": "create_zip", "description": "اجمع كل الملفات في ملف ZIP للتحميل", "parameters": {"type": "object", "properties": {"zip_name": {"type": "string", "description": "اسم ملف ZIP"}}}}},
 ]
 
 class ChatRequest(BaseModel):
     message: str
 
-SYSTEM_PROMPT = """أنت مبرمج محترف خبير في بايثون.
+SYSTEM_PROMPT = """أنت NOVA، مساعد ذكي شامل وقوي جداً.
 
-قواعد أساسية:
-1. اكتب كود كامل وجاهز للتشغيل
-2. بعد كتابة أي ملف، شغّله بـ run_python
-3. إذا فشل التشغيل، اقرأ الخطأ بدقة، صلّح الملف، وشغّله مرة ثانية
-4. استمر بالإصلاح حتى ينجح التشغيل
-5. إذا احتجت مكتبة، استخدم install_package أولاً
-6. للألعاب الرسومية استخدم pygame، وللتطبيقات الرسومية tkinter
-7. تأكد من إغلاق كل الأقواس والعلامات
-8. في النهاية اشرح للمستخدم شنو سويت بالعربي
+أنت قادر على:
+1. **المحادثة العامة**: تجيب على أي سؤال (تاريخ، جغرافيا، رياضيات، علوم، دين، نصائح، إلخ) بلغة عربية واضحة ومفيدة.
+2. **البرمجة بكل اللغات**: Python, JavaScript, HTML, CSS, Java, C++, C#, PHP, Go, Ruby, SQL, Bash.
+3. **كتابة التطبيقات الكاملة**: مواقع ويب، APIs، ألعاب، أدوات، تطبيقات سطح مكتب.
+4. **الكتابة الإبداعية**: مقالات، قصص، قصائد، رسائل، سيناريوهات.
+5. **الترجمة والتلخيص والتحليل**.
 
-مهم جداً:
-- لا تتوقف حتى ينجح التشغيل 100%
-- إذا فشل التشغيل، صلّح الخطأ فوراً وأعد التشغيل
-- استمر بالإصلاح حتى ينجح، ولو احتجت 10 محاولات
-- لا تعطي رد نهائي إلا بعد نجاح التشغيل"""
+قواعد ذكية مهمة:
+1. **حدد نوع الطلب أولاً**:
+   - إذا كان سؤال محادثة عادي (مثل "ما عاصمة اليابان؟") → جاوب مباشرة بدون استخدام أي أداة.
+   - إذا كان طلب برمجة (مثل "اكتب لي كود") → استخدم الأدوات.
+2. **للبرمجة**:
+   - اكتب كود كامل وجاهز للتشغيل.
+   - استخدم write_file للكتابة.
+   - استخدم run_python لتشغيل كود بايثون.
+   - إذا فشل التشغيل، صلّح الخطأ وأعد التشغيل حتى ينجح.
+   - إذا احتجت مكتبة، استخدم install_package أولاً.
+3. **للمشاريع الكاملة**:
+   - نظّم الملفات بمجلدات (مثل web/index.html, web/style.css).
+   - اكتب كل ملف لوحده.
+   - اجمعهم بـ create_zip في النهاية.
+4. **لأي لغة برمجة** غير بايثون: اكتب الملف فقط، واشرح كيف يشغله المستخدم.
+
+ردك النهائي يكون بالعربي، واضح، ومنظم."""
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
@@ -133,13 +171,16 @@ async def chat(req: ChatRequest):
         messages.append(msg)
         
         if not msg.tool_calls:
-            return {"reply": msg.content, "logs": logs}
+            return {"reply": msg.content or "(تم)", "logs": logs}
         
         for tc in msg.tool_calls:
             name = tc.function.name
-            args = json.loads(tc.function.arguments)
-            result = TOOL_FUNCTIONS[name](**args)
-            logs.append(f"{name} -> {result[:150]}")
+            try:
+                args = json.loads(tc.function.arguments)
+                result = TOOL_FUNCTIONS[name](**args)
+            except Exception as e:
+                result = f"خطأ بالأداة: {str(e)}"
+            logs.append(f"{name} -> {result[:200]}")
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
@@ -147,6 +188,23 @@ async def chat(req: ChatRequest):
             })
     
     return {"reply": "وصلت للحد الأقصى من الدورات", "logs": logs}
+
+# ========== رفع الملفات ==========
+@app.post("/upload")
+async def upload_file(file: UploadFile = File(...)):
+    os.makedirs("projects", exist_ok=True)
+    path = os.path.join("projects", file.filename)
+    content = await file.read()
+    with open(path, "wb") as f:
+        f.write(content)
+    return {"message": f"تم رفع {file.filename}"}
+
+@app.get("/download/{filename}")
+async def download_file(filename: str):
+    path = os.path.join("projects", filename)
+    if not os.path.exists(path):
+        return {"error": "الملف غير موجود"}
+    return FileResponse(path, filename=filename)
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
